@@ -313,3 +313,226 @@ def build_tables(
         print(f"Warning: Could only generate {len(valid_tables)} out of {num_tables_to_generate} requested tables after checking all viable combinations.")
 
     return valid_tables
+
+from PIL import Image, ImageDraw, ImageFont
+import os
+
+def visualize_timetable(table: Table, filename: str = 'timetable.png'):
+    """
+    Generates an image visualizing a timetable from a Table object.
+
+    Args:
+        table: The Table object containing the schedule.
+        filename: The name of the file to save the image (e.g., 'timetable.png').
+    """
+    # Define constants for visualization
+    # Increased resolution factor (e.g., 2x for all dimensions)
+    RESOLUTION_FACTOR = 2
+
+    CELL_WIDTH = 120 * RESOLUTION_FACTOR
+    CELL_HEIGHT = 60 * RESOLUTION_FACTOR
+    HEADER_HEIGHT = 40 * RESOLUTION_FACTOR # Height for period labels at the top
+    SIDE_BAR_WIDTH = 80 * RESOLUTION_FACTOR # Width for day labels on the left
+    MARGIN = 10 * RESOLUTION_FACTOR
+    BACKGROUND_COLOR = (255, 255, 255)  # White
+    GRID_COLOR = (200, 200, 200)      # Light grey
+    TEXT_COLOR = (0, 0, 0)            # Black
+    EVENT_FILL_COLOR = (230, 240, 255) # Light blue
+    EVENT_OUTLINE_COLOR = (150, 180, 220) # Medium blue
+
+    # Determine number of days and periods
+    num_days = len(WEEK_DAYS)
+    max_periods = 12 # Max periods from the Table initialization
+
+    # Calculate image dimensions (Periods as columns, Days as rows)
+    img_width = SIDE_BAR_WIDTH + max_periods * CELL_WIDTH + 2 * MARGIN
+    img_height = HEADER_HEIGHT + num_days * CELL_HEIGHT + 2 * MARGIN
+
+    # Create image and drawing object
+    image = Image.new('RGB', (img_width, img_height), BACKGROUND_COLOR)
+    draw = ImageDraw.Draw(image)
+
+    # Load font - try multiple paths before falling back to default
+    font_paths = [
+        "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf", # Common on Linux
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",  # Often available
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", # Another common one
+    ]
+
+    # Base font sizes (will be scaled by RESOLUTION_FACTOR)
+    base_font_size = 18
+    base_font_small_size = 14
+
+    font = ImageFont.load_default() # Initialize with default in case no TrueType font is found
+    font_small = ImageFont.load_default()
+    true_type_font_loaded = False
+
+    for path in font_paths:
+        try:
+            font = ImageFont.truetype(path, base_font_size * RESOLUTION_FACTOR)
+            font_small = ImageFont.truetype(path, base_font_small_size * RESOLUTION_FACTOR)
+            true_type_font_loaded = True
+            print(f"Successfully loaded font from {path}")
+            break # Stop at the first successful font load
+        except IOError:
+            continue
+
+    if not true_type_font_loaded:
+        print("Warning: No TrueType font found from common paths. Using default bitmap font. Text size might be smaller than intended.")
+
+    # Draw grid lines
+    # Vertical lines (for periods)
+    for i in range(max_periods + 1):
+        x = SIDE_BAR_WIDTH + i * CELL_WIDTH + MARGIN
+        draw.line([(x, HEADER_HEIGHT + MARGIN), (x, img_height - MARGIN)], fill=GRID_COLOR, width=1)
+    # Horizontal lines (for days)
+    for i in range(num_days + 1):
+        y = HEADER_HEIGHT + i * CELL_HEIGHT + MARGIN
+        draw.line([(SIDE_BAR_WIDTH + MARGIN, y), (img_width - MARGIN, y)], fill=GRID_COLOR, width=1)
+
+    # Draw period labels (headers - P1 to P12)
+    for i in range(max_periods): # i from 0 to 11
+        period_label_text = f"P{i+1}" # Display P1 to P12
+        x_center = SIDE_BAR_WIDTH + i * CELL_WIDTH + MARGIN + CELL_WIDTH / 2
+        y_center = MARGIN + HEADER_HEIGHT / 2
+
+        # Calculate text bounding box to center it
+        bbox = draw.textbbox((0, 0), period_label_text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        draw.text((x_center - text_width / 2, y_center - text_height / 2), period_label_text, fill=TEXT_COLOR, font=font)
+
+    # Draw day labels (side bar)
+    for day_idx, day_abbr in enumerate(WEEK_DAYS):
+        day_full = WEEK_DAYS_FULL[day_idx]
+        x_center = MARGIN + SIDE_BAR_WIDTH / 2
+        y_center = HEADER_HEIGHT + day_idx * CELL_HEIGHT + MARGIN + CELL_HEIGHT / 2
+
+        # Calculate text bounding box to center it
+        bbox = draw.textbbox((0, 0), day_full, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        draw.text((x_center - text_width / 2, y_center - text_height / 2), day_full, fill=TEXT_COLOR, font=font)
+
+    # --- Detect Merged Events --- (from previous step)
+    merged_events = {}
+
+    for day_idx, day_abbr in enumerate(WEEK_DAYS):
+        day_schedule = table[day_abbr]
+        merged_events[day_abbr] = []
+        period_ptr = 0
+
+        while period_ptr < max_periods:
+            current_item = day_schedule[period_ptr]
+
+            if current_item is not None:
+                subject_obj, group_name, event_name = current_item
+                start_period = period_ptr
+                end_period = period_ptr
+
+                # Check for consecutive identical events
+                next_period_ptr = period_ptr + 1
+                while next_period_ptr < max_periods:
+                    next_item = day_schedule[next_period_ptr]
+                    if next_item is not None and \
+                       next_item[0].name == subject_obj.name and \
+                       next_item[1] == group_name and \
+                       next_item[2] == event_name:
+                        end_period = next_period_ptr
+                        next_period_ptr += 1
+                    else:
+                        break
+
+                merged_events[day_abbr].append({
+                    'subject': subject_obj,
+                    'group': group_name,
+                    'event': event_name,
+                    'start_period': start_period,
+                    'end_period': end_period
+                })
+                period_ptr = end_period + 1 # Move pointer past the merged block
+            else:
+                period_ptr += 1 # Move to the next period if current is empty
+
+    # --- Draw Merged Cells (and text within them) --- (updated for text wrapping and centering)
+    for day_idx, day_abbr in enumerate(WEEK_DAYS):
+        for event_block in merged_events.get(day_abbr, []):
+            subject_obj = event_block['subject']
+            group_name = event_block['group']
+            event_name = event_block['event']
+            start_period = event_block['start_period']
+            end_period = event_block['end_period']
+
+            # Calculate coordinates for the merged event rectangle
+            x1 = SIDE_BAR_WIDTH + start_period * CELL_WIDTH + MARGIN
+            y1 = HEADER_HEIGHT + day_idx * CELL_HEIGHT + MARGIN
+            x2 = SIDE_BAR_WIDTH + (end_period + 1) * CELL_WIDTH + MARGIN # +1 because end_period is inclusive
+            y2 = y1 + CELL_HEIGHT
+
+            # Draw event rectangle with padding
+            event_padding = 2 * RESOLUTION_FACTOR
+            draw.rectangle([(x1 + event_padding, y1 + event_padding), (x2 - event_padding, y2 - event_padding)],
+                           fill=EVENT_FILL_COLOR, outline=EVENT_OUTLINE_COLOR, width=1 * RESOLUTION_FACTOR)
+
+            # Prepare text lines for the event
+            event_text = f"{subject_obj.name}\n({group_name})\n{event_name}"
+            cell_inner_width = (x2 - x1) - 2 * event_padding
+            cell_inner_height = (y2 - y1) - 2 * event_padding
+
+            # Function to wrap text (as per instruction 2)
+            def wrap_text(text, font, max_width, draw_obj):
+                lines = []
+                current_line = []
+                words = text.replace('\n', ' \n ').split(' ')
+
+                for word in words:
+                    if word == '\n': # Handle explicit newlines
+                        lines.append(" ".join(current_line))
+                        current_line = []
+                        continue
+
+                    test_line = " ".join(current_line + [word])
+                    bbox = draw_obj.textbbox((0, 0), test_line, font=font)
+                    text_width = bbox[2] - bbox[0]
+
+                    if text_width <= max_width:
+                        current_line.append(word)
+                    else:
+                        if current_line:
+                            lines.append(" ".join(current_line))
+                        current_line = [word]
+                if current_line:
+                    lines.append(" ".join(current_line))
+                return lines
+
+            wrapped_lines = wrap_text(event_text, font_small, cell_inner_width, draw) # Instruction 4
+
+            # Calculate total height of wrapped text block (Instruction 5)
+            total_text_height = 0
+            for line in wrapped_lines:
+                bbox = draw.textbbox((0, 0), line, font=font_small)
+                total_text_height += (bbox[3] - bbox[1])
+            # Add line spacing
+            total_text_height += (len(wrapped_lines) - 1) * (2 * RESOLUTION_FACTOR)
+
+            # Vertical centering (Instruction 6)
+            current_y = y1 + event_padding + (cell_inner_height - total_text_height) / 2
+
+            for line in wrapped_lines: # Instruction 7
+                bbox = draw.textbbox((0, 0), line, font=font_small)
+                text_width = bbox[2] - bbox[0]
+                text_height = bbox[3] - bbox[1]
+
+                # Horizontal centering (Instruction 7b)
+                draw.text(
+                    (x1 + event_padding + (cell_inner_width - text_width) / 2, current_y),
+                    line,
+                    fill=TEXT_COLOR, font=font_small
+                )
+                current_y += text_height + (2 * RESOLUTION_FACTOR) # Line spacing (Instruction 7d)
+
+    # Save the image
+    image.save(filename)
+    print(f"Timetable visualization saved to {filename}")
